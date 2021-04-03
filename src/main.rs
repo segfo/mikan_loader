@@ -15,7 +15,6 @@ use crate::hardware::x86_64::io::*;
 use uefi::table::boot::{MemoryType, MemoryAttribute};
 use uefi::proto::media::file::FileMode;
 
-
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     loop {unsafe{halt();}}
@@ -42,14 +41,12 @@ impl<'a> MemoryMap<'a>{
             boot:boot,
         }
     }
-    fn get_memory_map(&mut self)->&[uefi::table::boot::MemoryDescriptor]{
+    fn save_memory_map(&mut self,file:&mut Write){
         let mut mmap_buffer = unsafe{core::slice::from_raw_parts_mut(self.buffer,self.buffer_size)};
-        self.map_key = Some(self.boot.memory_map(&mut mmap_buffer).unwrap().unwrap().0);
-        unsafe{
-            core::slice::from_raw_parts(
-                self.buffer as *mut uefi::table::boot::MemoryDescriptor,
-                self.buffer_size/core::mem::size_of::<uefi::table::boot::MemoryDescriptor>()
-            )
+        let (map_key,iter) = self.boot.memory_map(&mut mmap_buffer).unwrap().unwrap();
+        self.map_key = Some(map_key);
+        for map in iter{
+            writeln!(file, "{:08x},{:08x},{},{:?},{:?}",map.phys_start,map.virt_start,map.page_count,map.ty,map.att);
         }
     }
     fn get_key(&self)->Option<uefi::table::boot::MemoryMapKey>{
@@ -65,12 +62,11 @@ fn efi_main(handle: Handle, st: SystemTable<Boot>) -> Status {
     let file_handle = open_file(&handle,&boot,"\\memory_map.csv",FileMode::CreateReadWrite);
     let mut file = FileWriter::new(file_handle);
     writeln!(file,"\"Physical Address\",\"Virtual Address\",\"Pages\",\"Memory Type\",\"Attributes\"");
-    for map in memory_map.get_memory_map().into_iter(){
-        writeln!(st.stdout(), "{:08x},{:08x},{},{:?},{:?}",map.phys_start,map.virt_start,map.page_count,map.ty,map.att);
-        writeln!(file, "{:08x},{:08x},{},{:?},{:?}",map.phys_start,map.virt_start,map.page_count,map.ty,map.att);
-    }
-    file.flush();
+    memory_map.save_memory_map(&mut file);
+    memory_map.save_memory_map(st.stdout());
     writeln!(st.stdout(), "ok");
+    file.flush();
+    
     loop {
         unsafe {
             halt();
