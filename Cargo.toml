@@ -9,3 +9,9 @@ edition = "2018"
 [dependencies]
 uefi = { git = "https://github.com/rust-osdev/uefi-rs.git" }
 rlibc = "1.0.0"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

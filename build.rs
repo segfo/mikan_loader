@@ -9,12 +9,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     for i in 0..srcs.len() {
         let src = Path::new(srcs[i]).file_stem().unwrap().to_str().unwrap();
         Command::new("x86_64-w64-mingw32-gcc")
-            .args(&[&format!("src/x86_64/{}.s", src), "-c", "-fPIC", "-o"])
+            .args(&[&format!("src/hardware/x86_64/{}.s", src), "-c", "-fPIC", "-o"])
             .arg(&format!("{}/{}.o", out_dir, src))
             .status()
             .unwrap();
         Command::new("x86_64-w64-mingw32-ar")
-            .args(&["crus", &format!("{}.lib", lib_name), &format!("{}.o", src)])
+            .args(&["crUs", &format!("{}.lib", lib_name), &format!("{}.o", src)])
             .current_dir(&Path::new(&out_dir))
             .status()
             .unwrap();
