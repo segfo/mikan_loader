@@ -3,7 +3,7 @@
 #![feature(lang_items)]
 #![feature(abi_efiapi)]
 
-mod x86_64;
+mod hardware;
 mod file;
 use core::fmt::Write;
 use core::panic::PanicInfo;
@@ -11,7 +11,7 @@ use core::panic::PanicInfo;
 use rlibc;
 use uefi::prelude::*;
 use crate::file::*;
-use crate::x86_64::io::*;
+use crate::hardware::x86_64::io::*;
 use uefi::table::boot::{MemoryType, MemoryAttribute};
 use uefi::proto::media::file::FileMode;
 
