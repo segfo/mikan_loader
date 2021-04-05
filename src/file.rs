@@ -1,5 +1,7 @@
 use core::fmt::Write;
 use uefi::prelude::*;
+use uefi::table::boot::MemoryType;
+use uefi::proto::media::file::FileInfo;
 use uefi::proto::{
     loaded_image::LoadedImage,
     media::{
@@ -8,20 +10,49 @@ use uefi::proto::{
     }
 };
 use uefi::ResultExt;
-pub struct FileWriter{
+pub struct FileReaderWriter{
     file:RegularFile
 }
 
-impl FileWriter{
+impl FileReaderWriter{
     pub fn new(file:RegularFile)->Self{
-        FileWriter{file:file}
+        FileReaderWriter{file:file}
     }
     pub fn flush(&mut self){
         self.file.flush();
     }
+    pub fn close(mut self){
+        self.file.close();
+    }
+    pub fn write(&mut self,s:&str){
+        self.write_str(s).unwrap();
+    }
+    pub fn read(&mut self,buf:&mut [u8])->usize{
+        self.file.read(buf);
+        0
+    }
+    pub fn get_size(&mut self,boot:&uefi::prelude::BootServices)->u64{
+        let mut buf = [0x0u8;0x0];
+        let size = match self.file.get_info::<FileInfo>(&mut buf){
+            Err(e)=>{ 
+                let buffer_len = e.data().unwrap();
+                let buffer = boot.allocate_pool(
+                    MemoryType::BOOT_SERVICES_DATA,
+                    buffer_len
+                ).unwrap_success();
+                let buffer = unsafe{core::slice::from_raw_parts_mut(buffer,buffer_len)};
+                match self.file.get_info::<FileInfo>(buffer){
+                    Ok(info)=>info.unwrap().file_size(),
+                    Err(_)=>panic!("")
+                }
+            },
+            Ok(info)=>info.unwrap().file_size()
+        };
+        size
+    }
 }
 
-impl core::fmt::Write for FileWriter {
+impl core::fmt::Write for FileReaderWriter {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         self.file.write((s).as_bytes()).unwrap_success();
         Ok(())
