@@ -40,10 +40,17 @@ impl FileReaderWriter{
                     MemoryType::BOOT_SERVICES_DATA,
                     buffer_len
                 ).unwrap_success();
-                let buffer = unsafe{core::slice::from_raw_parts_mut(buffer,buffer_len)};
-                match self.file.get_info::<FileInfo>(buffer){
-                    Ok(info)=>info.unwrap().file_size(),
-                    Err(_)=>panic!("")
+                // buffer_sliceはbufferのエイリアス。ライフタイムは同じ。
+                let buffer_slice = unsafe{core::slice::from_raw_parts_mut(buffer,buffer_len)};
+                match self.file.get_info::<FileInfo>(buffer_slice){
+                    Ok(info)=>{
+                        boot.free_pool(buffer).unwrap_success();
+                        info.unwrap().file_size()
+                    },
+                    Err(_)=>{
+                        boot.free_pool(buffer).unwrap_success();
+                        panic!("")
+                    }
                 }
             },
             Ok(info)=>info.unwrap().file_size()

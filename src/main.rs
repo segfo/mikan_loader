@@ -94,9 +94,6 @@ impl<'a> MemoryMap<'a> {
     fn get_key(&self) -> Option<uefi::table::boot::MemoryMapKey> {
         self.map_key
     }
-    fn free(&self) {
-        // self.boot.free_pool
-    }
     fn exit_boot_services(self) -> (*mut u8, usize) {
         self.boot.free_pool(self.buffer).unwrap_success();
         (self.buffer, self.buffer_size)
