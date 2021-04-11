@@ -10,6 +10,7 @@ edition = "2018"
 uefi = { git = "https://github.com/rust-osdev/uefi-rs.git" }
 rlibc = "1.0.0"
 common = {path="../common"}
+xmas-elf = "0.7.0"
 
 [profile.dev]
 panic = "abort"
