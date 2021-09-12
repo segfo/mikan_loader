@@ -22,7 +22,7 @@ impl FileReaderWriter {
     pub fn flush(&mut self) {
         self.file.flush();
     }
-    pub fn close(mut self) {
+    pub fn close(self) {
         self.file.close();
     }
     pub fn write(&mut self, s: &str) {

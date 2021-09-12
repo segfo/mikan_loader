@@ -7,10 +7,13 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-uefi = { git = "https://github.com/rust-osdev/uefi-rs.git" }
+uefi = { version="0.9.0" }
+uefi-services = "0.6.0" 
 rlibc = "1.0.0"
 common = {path="../common"}
 xmas-elf = "0.7.0"
+heapless = "0.7.4"
+log = { version = "0.4.11", default-features = false }
 
 [profile.dev]
 panic = "abort"

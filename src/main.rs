@@ -2,54 +2,61 @@
 #![no_main]
 #![feature(lang_items)]
 #![feature(abi_efiapi)]
+#![feature(alloc_error_handler)]
 
 mod file;
 use crate::file::*;
-use common::hardware::*;
+use common::{hardware::*, memory::*};
 use core::fmt::Write;
 use core::panic::PanicInfo;
+use heapless;
 #[allow(unused_imports)]
 use rlibc;
+use uefi_services::*;
 use uefi::prelude::*;
 use uefi::proto::media::file::FileMode;
 use uefi::table::boot::{AllocateType, MemoryAttribute, MemoryType};
 use xmas_elf::ElfFile;
 
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    loop {
-        unsafe {
-            io::halt();
-        }
-    }
-}
+// #[panic_handler]
+// fn panic(info: &PanicInfo) -> ! {
+//     loop {
+//         unsafe {
+//             io::halt();
+//         }
+//     }
+// }
 
-#[lang = "eh_personality"]
-extern "C" fn eh_personality() {}
+// #[lang = "eh_personality"]
+// extern "C" fn eh_personality() {}
 
 struct MemoryMap<'a> {
     buffer: *mut u8,
     buffer_size: usize,
     boot: &'a BootServices,
+    entry_count: usize,
     map_key: Option<uefi::table::boot::MemoryMapKey>,
 }
 
 // https://dox.ipxe.org/structEFI__MEMORY__DESCRIPTOR.html
 struct MemoryDescriptor {
-    phys_start: usize,
-    virt_start: usize,
-    page_count: u64,
     memory_type: u32,
+    phys_start: u64,
+    virt_start: u64,
+    page_count: u64,
     memory_attribute: u64,
 }
 impl<'a> MemoryMap<'a> {
     fn new(boot: &'a BootServices) -> Self {
-        let map_size = boot.memory_map_size();
+        // メモリマップの標準要求サイズの1.5倍量を4kb単位に切り上げた量を確保する
+        // 後でページ単位で空き領域情報としてカーネルメモリマップに登録したい。
+        let map_size = ((boot.memory_map_size() * 2 - boot.memory_map_size()) + 0x0fff) & !0xfff;
         MemoryMap {
             buffer: boot
                 .allocate_pool(MemoryType::BOOT_SERVICES_DATA, map_size)
                 .unwrap_success(),
             buffer_size: map_size,
+            entry_count: 0,
             map_key: None,
             boot: boot,
         }
@@ -59,44 +66,25 @@ impl<'a> MemoryMap<'a> {
             unsafe { core::slice::from_raw_parts_mut(self.buffer, self.buffer_size) };
         let (map_key, iter) = self.boot.memory_map(&mut mmap_buffer).unwrap_success();
         self.map_key = Some(map_key);
-        for map in iter {
-            let memory_type = match map.ty {
-                MemoryType::RESERVED => 0,
-                MemoryType::LOADER_CODE => 1,
-                MemoryType::LOADER_DATA => 2,
-                MemoryType::BOOT_SERVICES_CODE => 3,
-                MemoryType::BOOT_SERVICES_DATA => 4,
-                MemoryType::RUNTIME_SERVICES_CODE => 5,
-                MemoryType::RUNTIME_SERVICES_DATA => 6,
-                MemoryType::CONVENTIONAL => 7,
-                MemoryType::UNUSABLE => 8,
-                MemoryType::ACPI_RECLAIM => 9,
-                MemoryType::ACPI_NON_VOLATILE => 10,
-                MemoryType::MMIO => 11,
-                MemoryType::MMIO_PORT_SPACE => 12,
-                MemoryType::PAL_CODE => 13,
-                MemoryType::PERSISTENT_MEMORY => 14,
-                _ => 0xffff_ffff,
-            };
-            writeln!(file,"\"Physical Address\":\"0x{:08x}\",\"Virtual Address\":\"0x{:08x}\",\"Pages\":{},\"Memory Type\":\"{:?}\",\"Attributes\":\"{:?}\"",map.phys_start,map.virt_start,map.page_count,map.ty,map.att);
-
-            let map = MemoryDescriptor {
-                phys_start: map.phys_start as usize,
-                virt_start: map.virt_start as usize,
-                page_count: map.page_count as u64,
-                memory_type: memory_type,
-                memory_attribute: map.att.bits(),
-            };
-            // writeln!(file,
-            //     "\"Physical Address\":\"0x{:08x}\",\"Virtual Address\":\"0x{:08x}\",\"Pages\":{},\"Memory Type\":\"0x{:04x}\",\"Attributes\":\"0x{:08x}\"",
-            //             map.phys_start,map.virt_start,map.page_count,map.memory_type,map.memory_attribute);
+        for map in iter.clone() {
+            self.entry_count += 1;
+            writeln!(file,
+                "\"Physical Address\":\"0x{:08x}\",\"Virtual Address\":\"0x{:08x}\",\"Pages\":{},\"Memory Type\":\"{:?}\",\"Attributes\":\"{:?}\"",
+                map.phys_start,map.virt_start,map.page_count,map.ty,map.att);
         }
     }
     fn get_key(&self) -> Option<uefi::table::boot::MemoryMapKey> {
         self.map_key
     }
-    fn exit_boot_services(self) -> (*mut u8, usize) {
+    fn get_entry_count(&self) -> usize {
+        self.entry_count
+    }
+
+    fn mmap_free(self) {
         self.boot.free_pool(self.buffer).unwrap_success();
+    }
+    // exit_boot_serviceを呼ぶためのマップ情報を返す
+    fn exit_boot_services(self) -> (*mut u8, usize) {
         (self.buffer, self.buffer_size)
     }
 }
@@ -141,7 +129,7 @@ fn search_graphics_mode(
     limit_resolution: (usize, usize),
 ) -> (usize, usize) {
     let (w, h) = limit_resolution;
-    // 限界値がVGA規格未満だったら、とりあえず限界は1920x1080まで上げておく。
+    // ユーザから渡された限界値がVGA規格未満だったら、とりあえず上限を1920x1080まで上げておく。
     let limit_resolution = if (w < 640 || h < 480) {
         (1920, 1080)
     } else {
@@ -155,6 +143,7 @@ fn search_graphics_mode(
             continue;
         }
         let (w, h) = info.info().resolution();
+        log::info!("resolution: {} {}",w,h);
         let (mw, mh) = max_resolution;
         let (lw, lh) = limit_resolution;
         if w > h && (mw < w && mh < h) {
@@ -186,11 +175,18 @@ const FHD: (usize, usize) = (1920, 1080);
 
 #[entry]
 fn efi_main(handle: Handle, st: SystemTable<Boot>) -> Status {
+    uefi_services::init(&st).expect_success("Failed to initialize utils");
+    st.stdout()
+    .reset(false)
+    .expect_success("Failed to reset output buffer");
+    log::info!("init");
     let boot = &st.boot_services();
     let runtime = &st.runtime_services();
     let file_handle = open_file(&handle, &boot, "\\mikan_kernel", FileMode::Read);
+    log::info!("kernel open.");
     let mut kernel_file = FileReaderWriter::new(file_handle);
     // なにもないときのメモリマップ
+    log::info!("try memory map");
     let mut memory_map = MemoryMap::new(&boot);
     let file_handle = open_file(
         &handle,
@@ -198,15 +194,19 @@ fn efi_main(handle: Handle, st: SystemTable<Boot>) -> Status {
         "\\memory_map.csv",
         FileMode::CreateReadWrite,
     );
+    log::info!("save memory map");
     let mut file = FileReaderWriter::new(file_handle);
     memory_map.save_memory_map(&mut file);
+    memory_map.mmap_free();
     file.flush();
     file.close();
+    log::info!("save memory map done.");
     // フレームバッファの設定とバッファ情報の取得
     set_graphics_resolution(&boot, FHD);
     let mut frame_buffer = get_framebuffer_info(&boot);
     // カーネルのロード
     let kernel_main = load_kernel(boot, kernel_file);
+
     // メモリマップの取得
     let mut memory_map = MemoryMap::new(&boot);
     let file_handle = open_file(
@@ -215,14 +215,22 @@ fn efi_main(handle: Handle, st: SystemTable<Boot>) -> Status {
         "\\memory_map_loaded_kernel.csv",
         FileMode::CreateReadWrite,
     );
+
     let mut file = FileReaderWriter::new(file_handle);
     memory_map.save_memory_map(&mut file);
     file.flush();
     file.close();
+    let count = memory_map.get_entry_count();
     let (buf, buf_len) = memory_map.exit_boot_services();
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_len) };
-    st.exit_boot_services(handle, buf).unwrap_success();
-    kernel_main(frame_buffer);
+
+    let buf_parts = unsafe { core::slice::from_raw_parts_mut(buf, buf_len) };
+
+    let mut kernel_memory_map = init_kernel_memmap(st, handle, buf_parts);
+    // ブート時に使ったメモリマップの領域は空きであることの登録
+    unsafe {
+        kernel_memory_map.free_frames(memtranse(buf as usize, buf_len));
+    }
+    kernel_main(frame_buffer, kernel_memory_map);
     loop {
         unsafe {
             io::halt();
@@ -230,17 +238,100 @@ fn efi_main(handle: Handle, st: SystemTable<Boot>) -> Status {
     }
 }
 
+const MEM_MANAGER_AREA_SIZE: usize = 1024;
+
+// カーネルメモリマップの初期化
+fn init_kernel_memmap(
+    st: SystemTable<Boot>,
+    handle: Handle,
+    mmap_buf: &mut [u8],
+) -> PageMemoryManager {
+    let size = MEM_MANAGER_AREA_SIZE * core::mem::size_of::<MemoryArea>();
+    // safety
+    if size > isize::MAX as usize {
+        loop {
+            unsafe {
+                io::halt();
+            }
+        }
+    }
+    let boot = st.boot_services();
+    let buf = boot
+        .allocate_pool(MemoryType::BOOT_SERVICES_DATA, size)
+        .unwrap_success() as *mut MemoryArea;
+    let memmap_list =
+        unsafe { core::slice::from_raw_parts_mut::<MemoryArea>(buf, MEM_MANAGER_AREA_SIZE) };
+    let mut pmm = PageMemoryManager::new(memmap_list);
+    // 内部表現：0スタートのアドレスもあるはずなのでバイアスを設定する
+    pmm.set_addr_bias(0x1000);
+    //ブートサービスの終了（以降はbootserviceでのメモリ確保を行ってはいけない）
+    let (runtime, mmap_iter) = st.exit_boot_services(handle, mmap_buf).unwrap_success();
+    for map in mmap_iter {
+        let memory_type: u32 = match map.ty {
+            MemoryType::RESERVED => 0,
+            MemoryType::LOADER_CODE => 1,
+            MemoryType::LOADER_DATA => 2,
+            MemoryType::BOOT_SERVICES_CODE => 3,
+            MemoryType::BOOT_SERVICES_DATA => 4,
+            MemoryType::RUNTIME_SERVICES_CODE => 5,
+            MemoryType::RUNTIME_SERVICES_DATA => 6,
+            MemoryType::CONVENTIONAL => 7,
+            MemoryType::UNUSABLE => 8,
+            MemoryType::ACPI_RECLAIM => 9,
+            MemoryType::ACPI_NON_VOLATILE => 10,
+            MemoryType::MMIO => 11,
+            MemoryType::MMIO_PORT_SPACE => 12,
+            MemoryType::PAL_CODE => 13,
+            MemoryType::PERSISTENT_MEMORY => 14,
+            _ => 0xffff_ffff,
+        };
+        let md = MemoryDescriptor {
+            memory_type: memory_type,
+            phys_start: map.phys_start,
+            virt_start: map.virt_start,
+            page_count: map.page_count,
+            memory_attribute: map.att.bits(),
+        };
+        // 空きメモリの登録
+        
+        match map.ty {
+            MemoryType::CONVENTIONAL => unsafe {
+                pmm.free_frames(memtranse(
+                    md.phys_start as usize,
+                    md.page_count as usize * PAGE_SIZE as usize,
+                ));
+            },
+            MemoryType::LOADER_CODE
+            | MemoryType::LOADER_DATA
+            | MemoryType::BOOT_SERVICES_CODE
+            | MemoryType::BOOT_SERVICES_DATA => unsafe {
+                pmm.free_frames(memtranse(
+                    md.phys_start as usize,
+                    md.page_count as usize * PAGE_SIZE as usize,
+                ));
+            },
+            _ => {}
+        }
+    }
+    pmm
+}
+// カーネルベース
+const HMA_KERNEL_BASE: usize = 0x100000;
 fn load_kernel(
     boot: &BootServices,
     mut kernel_file: FileReaderWriter,
-) -> (extern "sysv64" fn(FrameBufferConfig) -> !) {
+) -> (extern "sysv64" fn(FrameBufferConfig, PageMemoryManager) -> !) {
     let kernel_size = kernel_file.get_size(&boot);
+    log::info!("kernel image area allocating.");
     let kernel_image = boot
         .allocate_pool(MemoryType::LOADER_DATA, kernel_size)
         .unwrap_success();
+
     let kernel_image_buf =
         unsafe { core::slice::from_raw_parts_mut(kernel_image as *mut u8, kernel_size as usize) };
+    log::info!("read image.");
     kernel_file.read(kernel_image_buf);
+    log::info!("read done.");
     kernel_file.close();
     let elf = ElfFile::new(kernel_image_buf).unwrap();
     let mut first = u64::MAX;
@@ -260,11 +351,12 @@ fn load_kernel(
         };
     }
     // カーネルロード先のメモリ確保する。
-    let HMA_KERNEL_BASE = 0x100000;
-    let n_pages = ((last - HMA_KERNEL_BASE) as usize + 0xfff) / 0x1000;
+    let last = last as usize;
+    log::info!("kernel 0x{:x} - 0x{:x}",first,last);
+    let n_pages = (last - HMA_KERNEL_BASE + 0xfff) / 0x1000;
     let kernel_load_area = boot
         .allocate_pages(
-            AllocateType::Address(HMA_KERNEL_BASE as usize),
+            AllocateType::Address(HMA_KERNEL_BASE),
             MemoryType::LOADER_DATA,
             n_pages,
         )
@@ -290,6 +382,7 @@ fn load_kernel(
             if mem_size <= file_size {
                 continue;
             }
+            // メモリ上のサイズのほうが大きい場合、その差分は0埋めする。
             let zero_init_area = mem_size - file_size;
             kernel_image
                 .offset((kernel_load_area + ph.offset() + ph.file_size()) as isize)
@@ -298,10 +391,11 @@ fn load_kernel(
     }
     // エントリポイントのアドレスをファイルバッファ内のELFヘッダから取得する
     let entry_point = unsafe {
-        let entry_point: extern "sysv64" fn(FrameBufferConfig) -> ! =
+        let entry_point: extern "sysv64" fn(FrameBufferConfig, PageMemoryManager) -> ! =
             core::mem::transmute(*((kernel_image as usize + 0x18) as *const usize));
         entry_point
     };
+    log::info!("kernel entry address : 0x{:x}",entry_point as usize);
     boot.free_pool(kernel_image).unwrap_success();
     entry_point
 }
